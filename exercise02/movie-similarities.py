@@ -1,6 +1,7 @@
 import sys
 from pyspark import SparkConf, SparkContext
 from math import sqrt
+import configparser
 
 def loadMovieNames():
 	movieNames = {}
@@ -47,11 +48,15 @@ def euclideanDistance(ratingPairs):
 	for x, y in ratingPairs:
 		score += (x - y) ** 2
 		numPairs += 1
-	score /= 36.0 # normalized value
-	return (sqrt(score), numPairs)
+	score = score / numPairs / 36 # normalized value
+	return (1 - sqrt(score), numPairs)
 
 conf = SparkConf().setMaster("local[*]").setAppName("MovieSimilarities")
 sc = SparkContext(conf = conf)
+
+config = configparser.ConfigParser()
+config.read("config.ini")
+metric = config['DEFAULT']['METRIC']
 
 nameDict = loadMovieNames()
 
@@ -61,11 +66,17 @@ ratings = data.map(parseLine)
 joinedRatings = ratings.join(ratings).filter(filterDuplicates)
 moviePairRatings = joinedRatings.map(makePairs).groupByKey()
 
-moviePairSimilarities = moviePairRatings.mapValues(cosineSimilarity).cache()
+if metric == 'COSINE':
+	moviePairSimilarities = moviePairRatings.mapValues(cosineSimilarity).cache()
+else:
+	moviePairSimilarities = moviePairRatings.mapValues(euclideanDistance).cache()
 
 if len(sys.argv) > 1:
 	movieID = int(sys.argv[1])
-	filteredResults = moviePairSimilarities.filter(lambda row: filterScores(row, movieID, 0.97, 50))
+	scoreThreshold = float(config[metric]['SCORE_THRESHOLD'])
+	coOccurenceThreshold = int(config[metric]['COOCCURENCE_THRESHOLD'])
+
+	filteredResults = moviePairSimilarities.filter(lambda row: filterScores(row, movieID, scoreThreshold, coOccurenceThreshold))
 
 	# sort by quality score
 	results = filteredResults.map(lambda pairSimilarities: (pairSimilarities[1], pairSimilarities[0])).sortByKey(ascending = False).take(10)
