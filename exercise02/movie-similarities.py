@@ -1,6 +1,7 @@
 import sys
 from pyspark import SparkConf, SparkContext
 from math import sqrt
+from statistics import mean
 import configparser
 
 def loadMovieNames():
@@ -14,6 +15,10 @@ def loadMovieNames():
 def parseLine(line):
 	l = line.split()
 	return (int(l[0]), (int(l[1]), float(l[2]))) # userID -> (movieID, rating)
+
+def parseLineScore(line):
+	l = line.split()
+	return (int(l[1]), float(l[2]))
 
 def makePairs(userRatings):
 	ratings = userRatings[1]
@@ -42,6 +47,35 @@ def cosineSimilarity(ratingPairs):
 		score = xy / (float(sqrt(xx) * sqrt(yy)))
 	return (score, numPairs)
 
+def pearsonCorrelationCoefficient(ratingPairs):
+	numPairs = 0
+	_x = _y = 0
+	for x, y in ratingPairs:
+		_x += x
+		_y += y
+		numPairs += 1
+	_x /= numPairs
+	_y /= numPairs
+
+	xy = xx = yy = 0
+	for x, y in ratingPairs:
+		xy += (x - _x) * (y - _y)
+		xx += (x - _x) ** 2
+		yy += (y - _y) ** 2
+	score = 0
+	if xx and yy:
+		score = xy / (sqrt(xx) * sqrt(yy))
+	return (abs(score), numPairs)
+
+def jaccardCoefficient(ratingPairs):
+	numPairs = intersect = 0
+	for x, y in ratingPairs:
+		numPairs += 1
+		if x == y:
+			intersect += 1
+	score = intersect / numPairs
+	return (score, numPairs)
+
 def euclideanDistance(ratingPairs):
 	numPairs = 0
 	score = 0
@@ -50,6 +84,18 @@ def euclideanDistance(ratingPairs):
 		numPairs += 1
 	score = score / numPairs / 36 # normalized value
 	return (1 - sqrt(score), numPairs)
+
+def metricSelector(ratingPairs, metric):
+	if metric == 'COSINE':
+		return cosineSimilarity(ratingPairs)
+	elif metric == 'EUCLIDEAN':
+		return euclideanDistance(ratingPairs)
+	elif metric == 'PEARSON':
+		return pearsonCorrelationCoefficient(ratingPairs)
+	elif metric == 'JACCARD':
+		return jaccardCoefficient(ratingPairs)
+	else:
+		return cosineSimilarity(ratingPairs)
 
 conf = SparkConf().setMaster("local[*]").setAppName("MovieSimilarities")
 sc = SparkContext(conf = conf)
@@ -63,18 +109,23 @@ nameDict = loadMovieNames()
 data = sc.textFile("ml-100k/u.data")
 ratings = data.map(parseLine)
 
+avgRating = data.map(parseLineScore).groupByKey().mapValues(mean)
+avgRatingBroadcast = sc.broadcast(avgRating.collectAsMap())
+
 joinedRatings = ratings.join(ratings).filter(filterDuplicates)
 moviePairRatings = joinedRatings.map(makePairs).groupByKey()
 
-if metric == 'COSINE':
-	moviePairSimilarities = moviePairRatings.mapValues(cosineSimilarity).cache()
-else:
-	moviePairSimilarities = moviePairRatings.mapValues(euclideanDistance).cache()
+moviePairSimilarities = moviePairRatings.mapValues(lambda row: metricSelector(row, metric)).cache()
 
 if len(sys.argv) > 1:
 	movieID = int(sys.argv[1])
 	scoreThreshold = float(config[metric]['SCORE_THRESHOLD'])
 	coOccurenceThreshold = int(config[metric]['COOCCURENCE_THRESHOLD'])
+
+	# get only good movies
+	minAvgScore = int(config[metric]['MINIMUM_AVG_SCORE'])
+	if minAvgScore:
+		moviePairSimilarities = moviePairSimilarities.filter(lambda row: row[0][0] == movieID and avgRatingBroadcast.value[row[0][1]] >= minAvgScore or row[0][1] == movieID and avgRatingBroadcast.value[row[0][0]] >= minAvgScore)
 
 	filteredResults = moviePairSimilarities.filter(lambda row: filterScores(row, movieID, scoreThreshold, coOccurenceThreshold))
 

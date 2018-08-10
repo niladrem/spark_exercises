@@ -8,5 +8,6 @@
 ##### Exercise 02
 - Find similar movies
 - Improve the Quality of Similar Movies  
+  
 Used dataset: MovieLens 100k  
 [Link to MovieLens Dataset](https://grouplens.org/datasets/movielens/)
